@@ -1,0 +1,884 @@
+---
+title: "LOL"
+author: ""
+date: "2023-06-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message = FALSE,warning = FALSE,comment = NA)
+```
+
+### 全局准备工作
+
+```{r}
+load_or_install_packages <- function(packages) {
+  for (package in packages) {
+    # 检查包是否已经安装 如果没有安装则下载并安装该包
+    if (!require(package, character.only = TRUE)) {
+      install.packages(package)
+      library(package, character.only = TRUE)
+    }
+  }
+}
+packages <- c("tidyverse", "psych","factoextra","cluster","psych","corrplot","openxlsx","caret","neuralnet","glmnet","e1071","caret","randomForest","pROC","glm2","glmnet","glmulti")
+ 
+
+# 导入和下载指定的包
+load_or_install_packages(packages)
+```
+
+### 一、特征选择
+
+#### &emsp;&emsp;1. 支持向量机模型
+```{r}
+# 导入数据集
+data <- read.csv("LCK.csv")
+#分训练集和测试集
+set.seed(123)
+train_index <- sample(nrow(data), 0.7*nrow(data))
+train_data <- data[train_index, ]
+test_data <- data[-train_index, ]
+# 训练模型
+svm_model <- svm(result ~ ., data = train_data)
+#测试数据集
+train_predict<-predict(svm_model,newdata = train_data)
+test_predict <- predict(svm_model, newdata = test_data) 
+train_predictdata <- cbind(train_data, predictedclass = train_predict) 
+#输出训练数据的混淆矩阵
+train_confusion <- table(actual = train_data$result, predictedclass = train_predict) 
+# 输出测试数据的混淆矩阵
+test_confusion <- table(actual = test_data$result, predictedclass = test_predict)
+library(pROC)
+rocCurve <- roc(test_data$result, test_predict, plot = FALSE, legacy.axes = TRUE)
+auc(rocCurve)
+# 计算特征的重要性
+svm_coef <- t(svm_model$coefs) %*% svm_model$SV
+svm_importance <- apply(svm_coef, 2, function(x) sqrt(sum(x^2)))
+names(svm_importance) <- names(train_data)[2:76]
+svm_importance <- sort(svm_importance, decreasing = TRUE)
+# 输出特征重要性
+print(svm_importance)
+plot(svm_importance)
+```
+
+
+#### &emsp;&emsp;2. Lasso回归
+
+```{r}
+gamedata<- read.csv("LCK.csv")
+gamedata<-na.omit(gamedata)
+y<-as.matrix(gamedata[,1])
+x<-as.matrix(gamedata[,2:76])
+#标准化
+x = scale(x,center = T,scale = T)
+y = scale(y)
+#筛选变量
+f1 <- glmnet(x, y, family="multinomial", intercept = F, alpha=1) 
+#这里alpha=1为LASSO回归，如果等于0就是岭回归
+#参数family=multinomial适用于多元离散因变量
+```
+
+```{r}
+print(f1)
+plot(f1, xvar="lambda", label=TRUE)
+#随着lambda增加，自由度和残差减少，最小lambda为0.00004
+#横坐标为lambda的对数，纵坐标为变量系数
+#随着lambda的增大，参数被压缩得越小。当lambda达到一定值时，一部分不重要的变量被压缩为0，将它们剔除
+#之后，要确定λ值为多少。我们已知哪些变量被压缩为0，其他变量的系数的估计值为多少。使用交叉验证挑选出λ值
+selecting <- cv.glmnet(x=x, y=y, family="multinomial", 
+                    intercept = F, alpha=1)
+```
+
+```{r}
+# 默认nfolds = 10
+plot(selecting)
+#选择平均误差最小的λ
+print(paste(selecting$lambda.min))
+#lambda.min`是一个交叉验证过程中选择的最优正则化参数值
+```
+
+```{r}
+best_lambda <- selecting$lambda.min
+
+best_model <- glmnet(x, y, alpha = 1, lambda = best_lambda)
+lasso_coef<-coef(best_model)
+cv_acc <- cv.glmnet(x, y, alpha = 1)$cvm[which(best_model$lambda == best_lambda)]
+print(paste("模型准确度为：", cv_acc))
+
+#输出变量，若没有系数，则lasso回归收缩为0，表明它的影响力不够，不是我们选择的重要变量
+print(lasso_coef)
+plot(lasso_coef)
+```
+
+#### &emsp;&emsp;3. 随机森林
+```{r}
+#随机森林
+#划分训练数据和测试数据
+Data = read.csv('LCK_team_clean.csv') # 读入数据
+Data[, "result"] <- as.factor(Data[, "result"]) #将目标变量转化为因子变量
+set.seed(1234) # 设置随机种子
+ind <- sample(2, nrow(Data), replace = TRUE, prob = c(0.7, 0.3)) # 随机抽取70%定义为训练数据集，30%为测试数据集
+traindata <- Data[ind == 1, ]
+testdata <- Data[ind == 2, ]
+#随机森林法
+library(randomForest)
+traindata$result<-as.factor(traindata$result)
+testdata$quality<-as.factor(testdata$result)
+re_randomforest <- randomForest(result~., data = traindata,ntree =500,mtry=3,importance=TRUE,proximity=TRUE)
+re_randomforest$importance
+varImpPlot(re_randomforest, main = "variable importance")
+re_randomforest
+
+library(pROC) #绘制ROC曲线
+#对测试集进行预测
+pre_ran <- predict(re_randomforest,newdata=testdata)
+obs_p_ran = data.frame(prob=pre_ran,obs=testdata$result)#将真实值和预测值整合
+table(testdata$result,pre_ran,dnn=c("真实值","预测值"))#输出混淆矩阵
+#绘制ROC曲线
+ran_roc <- roc(testdata$quality,as.numeric(pre_ran))
+plot(ran_roc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),grid.col=c("green", "red"), max.auc.polygon=TRUE,auc.polygon.col="skyblue", print.thres=TRUE,main='随机森林模型ROC曲线,mtry=3,ntree=500')
+```
+
+
+#### &emsp;&emsp;4. 逻辑回归
+```{r}
+#GLM
+df = read.csv('LCK_team_ARF.csv')
+# 线性函数归一化
+nor_min_max=function(x){
+  y=na.omit(x)
+  return((x - min(y))/(max(y) - min(y)))
+}
+dfmin_max = apply(df, 2,nor_min_max)  # 2是对列进行计算；1是对行进行计算
+write.csv(dfmin_max,file = 'export.csv')  #导出csv格式
+
+#逻辑回归
+library(glm2)
+library(glmnet)
+library(glmulti)
+
+DataForWR = read.csv('export.csv')
+
+# Split the data into training and testing sets
+unique(DataForWR$teamname)
+DataForWR$result = as.factor(DataForWR$result)
+DataForWR$firstbaron = as.factor(DataForWR$firstbaron)
+str(DataForWR)
+
+# logistic regression model
+lr.full = glm2(result~., family = binomial(link = 'logit'), data = DataForWR)
+summary(lr.full)
+```
+
+### 二、选手风格与实力分析
+
+### &emsp;1. 聚类分析
+####  &emsp;1.1Top选手
+```{r}
+#load data
+df <- read.csv("LCK_top.csv")
+fviz_nbclust(df,kmeans,method = "wss")
+#remove rows with missing 
+df <- na.omit(df)
+#scale each variable to have a mean of 0 and sd of 1
+df <- scale(df)
+df <- tibble::as_tibble(df)
+#view first six rows of dataset
+head(df)
+
+
+# 设置随机种子，让结果可以重现
+set.seed(1)
+# 调用kmeans聚类算法 
+km <- kmeans(df, centers = 3, nstart = 25)
+#plot results of final k-means model
+fviz_cluster(km, data = df)
+
+#find means of each cluster
+aggregate(df, by=list(cluster=km$cluster), mean)
+
+sil = silhouette(km$cluster, dist(df))
+rownames(sil) = rownames(df)
+head(tibble::as_tibble(sil[, 1:3]))
+
+fviz_silhouette(sil)
+#文件名为一个新文件
+lol<-cbind(df,cluster=km$cluster)
+write.csv(lol,file="topcluster.csv")
+
+```
+#### &emsp;1.2Bot选手
+```{r}
+#load data
+df <- read.csv("LCK_bot.csv")
+fviz_nbclust(df,kmeans,method = "wss")
+#remove rows with missing 
+df <- na.omit(df)
+#scale each variable to have a mean of 0 and sd of 1
+df <- scale(df)
+df <- tibble::as_tibble(df)
+#view first six rows of dataset
+head(df)
+
+
+# 设置随机种子，让结果可以重现
+set.seed(1)
+# 调用kmeans聚类算法 
+km <- kmeans(df, centers = 3, nstart = 25)
+#plot results of final k-means model
+fviz_cluster(km, data = df)
+
+#find means of each cluster
+aggregate(df, by=list(cluster=km$cluster), mean)
+
+sil = silhouette(km$cluster, dist(df))
+rownames(sil) = rownames(df)
+head(tibble::as_tibble(sil[, 1:3]))
+
+fviz_silhouette(sil)
+#文件名为一个新文件
+lol<-cbind(df,cluster=km$cluster)
+write.csv(lol,file="botcluster.csv")
+```
+#### &emsp;1.3Mid选手
+```{r}
+#load data
+df <- read.csv("LCK_mid.csv")
+fviz_nbclust(df,kmeans,method = "wss")
+```
+
+```{r}
+#remove rows with missing 
+df <- na.omit(df)
+#scale each variable to have a mean of 0 and sd of 1
+df <- scale(df)
+#view first six rows of dataset
+head(df)
+```
+
+```{r}
+
+# 设置随机种子，让结果可以重现
+set.seed(1)
+# 调用kmeans聚类算法 
+km <- kmeans(df, centers = 3, nstart = 25)
+#plot results of final k-means model
+fviz_cluster(km, data = df)
+```
+
+```{r}
+
+#find means of each cluster
+aggregate(df, by=list(cluster=km$cluster), mean)
+```
+
+```{r}
+sil = silhouette(km$cluster, dist(df))
+rownames(sil) = rownames(df)
+head(sil[, 1:3])
+```
+
+```{r}
+fviz_silhouette(sil)
+```
+
+```{r}
+lol<-cbind(df,cluster=km$cluster)
+write.csv(lol,file="midcluster.csv")
+#文件名为一个新文件
+```
+
+#### &emsp; 1.4 Jug选手
+
+```{r}
+#load data
+df <- read.csv("LCK_jin.csv")
+fviz_nbclust(df,kmeans,method = "wss")
+```
+
+```{r}
+#remove rows with missing 
+df <- na.omit(df)
+#scale each variable to have a mean of 0 and sd of 1
+df <- scale(df)
+#view first six rows of dataset
+head(df)
+```
+
+```{r}
+
+# 设置随机种子，让结果可以重现
+set.seed(1)
+# 调用kmeans聚类算法 
+km <- kmeans(df, centers = 3, nstart = 25)
+#plot results of final k-means model
+fviz_cluster(km, data = df)
+```
+
+```{r}
+
+#find means of each cluster
+aggregate(df, by=list(cluster=km$cluster), mean)
+```
+
+```{r}
+sil = silhouette(km$cluster, dist(df))
+rownames(sil) = rownames(df)
+head(sil[, 1:3])
+```
+
+```{r}
+fviz_silhouette(sil)
+```
+
+```{r}
+lol<-cbind(df,cluster=km$cluster)
+write.csv(lol,file="jincluster.csv")
+#文件名为一个新文件
+```
+
+#### &emsp;1.5 Sup选手
+```{r}
+library(factoextra)
+library(cluster)
+
+#load data
+df <- read.csv("LCK_sup.csv")
+fviz_nbclust(df,kmeans,method = "wss")
+library(factoextra)
+library(cluster)
+```
+
+```{r}
+#remove rows with missing 
+df <- na.omit(df)
+#scale each variable to have a mean of 0 and sd of 1
+df <- scale(df)
+#view first six rows of dataset
+head(df)
+```
+
+```{r}
+
+# 设置随机种子，让结果可以重现
+set.seed(1)
+# 调用kmeans聚类算法 
+km <- kmeans(df, centers = 3, nstart = 25)
+#plot results of final k-means model
+fviz_cluster(km, data = df)
+```
+
+```{r}
+
+#find means of each cluster
+aggregate(df, by=list(cluster=km$cluster), mean)
+```
+
+```{r}
+sil = silhouette(km$cluster, dist(df))
+rownames(sil) = rownames(df)
+head(sil[, 1:3])
+```
+
+```{r}
+fviz_silhouette(sil)
+```
+
+```{r}
+lol<-cbind(df,cluster=km$cluster)
+write.csv(lol,file="supcluster.csv")
+#文件名为一个新文件
+```
+### &emsp;2. 因子分析
+```{r}
+library(tidyverse)
+library(psych)
+library(corrplot)
+library("psych")
+library(openxlsx)
+#载入数据
+usedata<-read.csv("LCK_player.csv")
+#选择需要挑选出的列
+selectedcols = c('gameid',"playername",'position',"teamname",'kills','deaths','assists','firstbloodkill','damagetochampions','damageshare',
+'damagetakenperminute',
+'damagemitigatedperminute',
+'wpm',
+'dpm',
+'visionscore',
+'vspm',
+'wardsplaced',
+'wardskilled',
+'earnedgold',
+'earned.gpm',
+'earnedgoldshare',
+'total.cs',
+'minionkills',
+'monsterkills',
+'cspm',
+'goldat15',
+'xpat15',
+'csat15',
+'killsat15',
+'assistsat15',
+'deathsat15')
+ 
+final.data<-usedata[,selectedcols]
+data = final.data[,5:ncol(final.data)]
+#检查有无缺失值
+sum(is.na(data))
+
+ 
+# 确定是否较为适合进行因子分析--KMO 和 Bartlett球度检验
+KMO(data)
+cortest.bartlett(data)
+
+
+#确定出提取因子的数量--碎石图
+fafitfree <- fa(data,nfactors = ncol(data), rotate = "varimax")
+n_factors <- length(fafitfree$e.values)
+
+scree     <- data.frame(
+Factor_n =  as.factor(1:n_factors), 
+Eigenvalue = fafitfree$e.values)
+ggplot(scree, aes(x = Factor_n, y = Eigenvalue, group = 1)) + 
+geom_point() + geom_line() +
+xlab("Number of factors") +
+ylab("Initial eigenvalue") +
+labs( title = "Scree Plot", subtitle = "(Based on the unreduced correlation matrix)")
+
+parallel <- fa.parallel(data)  # 建议的因子数为6
+
+
+# 进行因子分析
+fit <- fa(data, nfactors = 6,rotate = "varimax")
+print(fit)
+fa.diagram(fit)
+
+# 各因子改名+计算总分+合并数据框
+score = data.frame(fit$scores)
+#权重：0.34 0.13 0.09 0.07 0.06 0.05
+score<-score%>%
+  mutate(MR4 = (-MR4))%>%
+  mutate('总分' =  MR1*0.34 + MR2*0.13 + MR3*0.09+MR6*0.07+MR5*0.06 + MR4*0.05)
+colnames(score) <- c("经济获取","视野价值",'承伤能力','团战贡献','击杀能力','容错程度','总分')
+
+# 此处数据为每个选手每一场比赛的得分
+final.data = cbind(final.data,score)
+
+
+
+# 此处数据将每个选手的比赛得分取均值进行汇总
+player.rank = final.data%>%
+  group_by(playername,position)%>%
+  summarise(经济获取 = mean(经济获取),视野价值 = mean(视野价值),承伤能力 = mean(承伤能力),团战贡献 = mean(团战贡献),击杀能力 = mean(击杀能力),容错程度 = mean(容错程度),总分 = mean(总分),)%>%
+  ungroup()
+
+# 对因子得分进行归一化处理
+normalization<-function(x){
+  xmin =min(x)
+  xmax = max(x)
+  xmean = mean(x)
+  x.normail<-(x-xmin)/(xmax-xmin)
+  return(x.normail)
+}
+player.rank$经济获取<-normalization(player.rank$经济获取)
+player.rank$视野价值<-normalization(player.rank$视野价值)
+player.rank$承伤能力<-normalization(player.rank$承伤能力)
+player.rank$团战贡献<-normalization(player.rank$团战贡献)
+player.rank$击杀能力<-normalization(player.rank$击杀能力)
+player.rank$容错程度<-normalization(player.rank$容错程度)
+player.rank$总分<-normalization(player.rank$总分)
+
+# 不同位置应该进行单独排名
+top.rank<-player.rank%>%
+  filter(position=='top')%>%
+  mutate(总分=normalization(总分),组内排名=rank(desc(总分)))
+mid.rank<-player.rank%>%
+  filter(position=='mid')%>%
+  mutate(总分=normalization(总分),组内排名=rank(desc(总分)))
+bot.rank<-player.rank%>%
+  filter(position=='bot')%>%
+  mutate(总分=normalization(总分),组内排名=rank(desc(总分)))
+sup.rank<-player.rank%>%
+  filter(position=='sup')%>%
+  mutate(总分=normalization(总分),组内排名=rank(desc(总分)))
+jng.rank<-player.rank%>%
+  filter(position=='jng')%>%
+  mutate(总分=normalization(总分),组内排名=rank(desc(总分)))
+
+# 将上面的合在一起
+player.rank <- rbind(top.rank,mid.rank,bot.rank,sup.rank,jng.rank)
+ 
+# 取所有数值型数据的两位小数
+player.rank1 <- player.rank[,1:2]
+player.rank2<-player.rank %>%
+  select_if(is.numeric) %>%
+  mutate_if(is.numeric, round, 2)
+player.rank<-cbind(player.rank1,player.rank2)
+print(tibble::as.tibble(player.rank))
+
+#写入文件
+write.xlsx(player.rank,file = "选手评级.xlsx",rownames = TRUE)
+
+```
+
+
+### 三、队伍缺陷分析
+```{r}
+library(tidyverse)
+library(psych)
+library(corrplot)
+library("psych")
+library(openxlsx)
+# 利用因子分析找出战队缺陷
+# 导入已经清洗好的数据集
+teamdata<-read.csv("LCK_teamforfactor.csv")
+# 提出开头的非数值列
+data<-teamdata[,2:ncol(teamdata)]
+
+KMO(data)
+cortest.bartlett(data)
+
+fafitfree <- fa(data,nfactors = ncol(data), rotate = "varimax")
+n_factors <- length(fafitfree$e.values)
+scree     <- data.frame(
+  Factor_n =  as.factor(1:n_factors), 
+  Eigenvalue = fafitfree$e.values)
+ggplot(scree, aes(x = Factor_n, y = Eigenvalue, group = 1)) + 
+  geom_point() + geom_line() +
+  xlab("Number of factors") +
+  ylab("Initial eigenvalue") +
+  labs( title = "Scree Plot", subtitle = "(Based on the unreduced correlation matrix)")
+
+parallel <- fa.parallel(data)  # 建议的因子数为8
+
+fit <- fa(data, nfactors = 8,rotate = "varimax")
+print(fit)
+fa.diagram(fit)
+
+
+score = data.frame(fit$scores)
+#0.23 0.14 0.11 0.07 0.06 0.06 0.04 0.04
+score<-score%>%
+  mutate('总分' =  MR2*0.24 + MR1*0.16 + MR8*0.11+MR4*0.07+MR3*0.06 + MR7*0.05 + MR5*0.04 +MR6*0.04)
+colnames(score) <- c("经济获取","大龙获取",'团队击杀协作','推塔运营','小龙获取','视野占领','视野防御','补刀能力','总分')
+
+
+# 归一化处理
+teamdata <- cbind(teamdata,score)
+normalization<-function(x){
+  xmin =min(x)
+  xmax = max(x)
+  xmean = mean(x)
+  x.normail<-(x-xmin)/(xmax-xmin)
+  return(x.normail)
+}
+team.rank = teamdata%>%
+  group_by(teamname)%>%
+  summarise(经济获取 = mean(经济获取), 大龙获取= mean(大龙获取),团队击杀协作 = mean(团队击杀协作),推塔运营 = mean(推塔运营),小龙获取 = mean(小龙获取),视野占领 = mean(视野占领),视野防御 = mean(视野防御),补刀能力 = mean(补刀能力),总分 = mean(总分),)%>%
+  ungroup()
+
+team.rank$经济获取<-normalization(team.rank$经济获取)
+team.rank$大龙获取<-normalization(team.rank$大龙获取)
+team.rank$团队击杀协作<-normalization(team.rank$团队击杀协作)
+team.rank$推塔运营<-normalization(team.rank$推塔运营)
+team.rank$小龙获取<-normalization(team.rank$小龙获取)
+team.rank$视野占领<-normalization(team.rank$视野占领)
+team.rank$视野防御<-normalization(team.rank$视野防御)
+team.rank$补刀能力<-normalization(team.rank$补刀能力)
+team.rank$总分<-normalization(team.rank$总分)
+team.rank<-team.rank%>%
+  mutate(排名=rank(desc(总分)))
+# 取两位小数
+team.rank1 <- team.rank[,1:1]
+team.rank2<-team.rank %>%
+  select_if(is.numeric) %>%
+  mutate_if(is.numeric, round, 2)
+team.rank<-cbind(team.rank1,team.rank2)
+print(tibble::as.tibble(team.rank))
+
+write.xlsx(team.rank,file = "队伍评级.xlsx",rowNames=TRUE)
+
+```
+
+
+### 四、探索性尝试
+```{r}
+
+# 载入所需要的包
+library(caret)
+
+# 建立五个位置的逻辑回归模型
+
+# AD
+# 导入数据
+LCK_bot <- read.csv("LCK_bot2.csv")
+# 模型建立
+bot_model <- glm(formula = 
+  result ~ kills+ deaths+ ckpm+ dpm+	cspm+	goldat15+	killsat15, 
+  data = LCK_bot, 
+  family = binomial(link = "logit"))
+# 回归模型性能评估
+LCK_bot_predictions <- predict(bot_model, newdata=LCK_bot, type="response")
+LCK_bot_predictions_class <- ifelse(LCK_bot_predictions > 0.5, 1, 0)
+# 创建混淆矩阵
+bot_confusion_matrix <- table(LCK_bot_predictions_class, LCK_bot$result)
+# 输出混淆矩阵
+print(bot_confusion_matrix)
+# 计算真阳性、真阴性、假阳性和假阴性
+bot_true_positive <- bot_confusion_matrix[1, 1]
+bot_true_negative <- bot_confusion_matrix[2, 2]
+bot_false_positive <- bot_confusion_matrix[2, 1]
+bot_false_negative <- bot_confusion_matrix[1, 2]
+# 计算准确率
+bot_accuracy <- (bot_true_positive + bot_true_negative) / sum(bot_confusion_matrix)
+# 输出准确率
+print(bot_accuracy)
+
+
+# 打野
+# 导入数据
+LCK_jng <- read.csv("LCK_jng2.csv")
+# 模型建立
+jng_model <- glm(formula = 
+  result ~
+  kills+	assists+	ckpm+	dpm+	vspm+	earned.gpm+ total.cs+ monsterkills+	cspm+	goldat15+	assistsat15,
+  data = LCK_jng, 
+  family = binomial(link = "logit"))
+# 回归模型性能评估
+LCK_jng_predictions <- predict(jng_model, newdata=LCK_jng, type="response")
+LCK_jng_predictions_class <- ifelse(LCK_jng_predictions > 0.5, 1, 0)
+# 创建混淆矩阵
+jng_confusion_matrix <- table(LCK_jng_predictions_class, LCK_jng$result)
+# 输出混淆矩阵
+print(jng_confusion_matrix)
+# 计算真阳性、真阴性、假阳性和假阴性
+jng_true_positive <- jng_confusion_matrix[1, 1]
+jng_true_negative <- jng_confusion_matrix[2, 2]
+jng_false_positive <- jng_confusion_matrix[2, 1]
+jng_false_negative <- jng_confusion_matrix[1, 2]
+# 计算准确率
+jng_accuracy <- (jng_true_positive + jng_true_negative) / sum(jng_confusion_matrix)
+# 输出准确率
+print(jng_accuracy)
+
+
+# 辅助
+# 导入数据
+LCK_sup <- read.csv("LCK_sup2.csv")
+# 模型建立
+sup_model <- glm(formula = 
+  result ~
+    assists+	ckpm+	wardsplaced+	wpm+	wardskilled+	wcpm+	controlwardsbought+	visionscore+	vspm+	assistsat10+	assistsat15,
+  data = LCK_sup, 
+  family = binomial(link = "logit"))
+# 回归模型性能评估
+LCK_sup_predictions <- predict(sup_model, newdata=LCK_sup, type="response")
+LCK_sup_predictions_class <- ifelse(LCK_sup_predictions > 0.5, 1, 0)
+# 创建混淆矩阵
+sup_confusion_matrix <- table(LCK_sup_predictions_class, LCK_sup$result)
+# 输出混淆矩阵
+print(sup_confusion_matrix)
+# 计算真阳性、真阴性、假阳性和假阴性
+sup_true_positive <- sup_confusion_matrix[1, 1]
+sup_true_negative <- sup_confusion_matrix[2, 2]
+sup_false_positive <- sup_confusion_matrix[2, 1]
+sup_false_negative <- sup_confusion_matrix[1, 2]
+# 计算准确率
+sup_accuracy <- (sup_true_positive + sup_true_negative) / sum(sup_confusion_matrix)
+# 输出准确率
+print(sup_accuracy)
+
+
+# 上单
+# 导入数据
+LCK_top <- read.csv("LCK_top2.csv")
+# 模型建立
+top_model <- glm(formula = 
+  result ~
+    kills+	ckpm+	controlwardsbought+	totalgold+	earned.gpm+	minionkills+	cspm+	killsat15, 
+  data = LCK_top, 
+  family = binomial(link = "logit"))
+# 回归模型性能评估
+LCK_top_predictions <- predict(top_model, newdata=LCK_top, type="response")
+LCK_top_predictions_class <- ifelse(LCK_top_predictions > 0.5, 1, 0)
+# 创建混淆矩阵
+top_confusion_matrix <- table(LCK_top_predictions_class, LCK_top$result)
+# 输出混淆矩阵
+print(top_confusion_matrix)
+# 计算真阳性、真阴性、假阳性和假阴性
+top_true_positive <- top_confusion_matrix[1, 1]
+top_true_negative <- top_confusion_matrix[2, 2]
+top_false_positive <- top_confusion_matrix[2, 1]
+top_false_negative <- top_confusion_matrix[1, 2]
+# 计算准确率
+top_accuracy <- (top_true_positive + top_true_negative) / sum(top_confusion_matrix)
+# 输出准确率
+print(top_accuracy)
+
+
+# 中单
+# 导入数据
+LCK_mid <- read.csv("LCK_mid2.csv")
+# 模型建立
+mid_model <- glm(formula = 
+ result ~
+ kills+	assists+	ckpm+	damagetochampions+	dpm+	wcpm+	vspm+	earnedgoldshare+	total.cs+	cspm+	goldat15+	killsat15+assistsat15,
+ data = LCK_mid, 
+ family = binomial(link = "logit"))
+# 回归模型性能评估
+LCK_mid_predictions <- predict(mid_model, newdata=LCK_mid, type="response")
+LCK_mid_predictions_class <- ifelse(LCK_mid_predictions > 0.5, 1, 0)
+# 创建混淆矩阵
+mid_confusion_matrix <- table(LCK_mid_predictions_class, LCK_mid$result)
+# 输出混淆矩阵
+print(mid_confusion_matrix)
+# 计算真阳性、真阴性、假阳性和假阴性
+mid_true_positive <- mid_confusion_matrix[1, 1]
+mid_true_negative <- mid_confusion_matrix[2, 2]
+mid_false_positive <- mid_confusion_matrix[2, 1]
+mid_false_negative <- mid_confusion_matrix[1, 2]
+# 计算准确率
+mid_accuracy <- (mid_true_positive + mid_true_negative) / sum(mid_confusion_matrix)
+# 输出准确率
+print(mid_accuracy)
+
+
+# 尝试将预测结果集结合成一个新的数据集,根据gameid和side实现数据的对应
+LCK_team <- read.csv("LCK_team2.csv")
+combined_data <- data.frame(gameid=LCK_team$gameid,side=LCK_team$side,realresult=LCK_team$result)
+combined_data$mid <- LCK_mid_predictions
+combined_data$top <- LCK_top_predictions
+combined_data$jng <- LCK_jng_predictions
+combined_data$bot <- LCK_bot_predictions
+combined_data$sup <- LCK_sup_predictions
+combined_data$mid_res <- LCK_mid_predictions_class
+combined_data$top_res <- LCK_top_predictions_class
+combined_data$jng_res <- LCK_jng_predictions_class
+combined_data$bot_res <- LCK_bot_predictions_class
+combined_data$sup_res <- LCK_sup_predictions_class
+```
+```{r}
+# 准备建立神经网络模型
+library(caret)
+library(neuralnet)
+# 数据准备
+neu_team <- combined_data
+neu_team$realresult <- as.factor(neu_team$realresult)
+# 数据划分：将数据70%分为训练集，30%分为测试集
+neu_train_data <- neu_team[1:1690,]
+neu_test_data <- neu_team[1691:2414,]
+# 模型建立
+set.seed(12345)
+neu_model <- neuralnet(realresult ~ 
+  mid + top + bot + jng + sup, data = neu_train_data, 
+  hidden = c(5), 
+  act.fct = "logistic")
+
+summary(neu_model)
+```
+```{r}
+plot(neu_model)
+```
+```{r}
+# 预测训练数据集的准确率
+neu_train_predictions <- compute(neu_model, neu_train_data)$net.result
+neu_train_predictions <- data.frame(neu_train_predictions)
+neu_train_predicted_classes <- ifelse(neu_train_predictions$X2 > 0.5, 1, 0)
+
+train_confusion_matrix <- table(neu_train_predicted_classes, neu_train_data$realresult)
+print(train_confusion_matrix)
+train_accuracy <- sum(diag(train_confusion_matrix)) / sum(train_confusion_matrix)
+train_accuracy
+
+# 测试数据集的准确率
+neu_test_predictions <- compute(neu_model, neu_test_data)$net.result
+neu_test_predictions <- data.frame(neu_test_predictions)
+neu_test_predicted_classes <- ifelse(neu_test_predictions$X2 > 0.5, 1, 0)
+
+test_confusion_matrix <- table(neu_test_predicted_classes, neu_test_data$realresult)
+print(test_confusion_matrix)
+
+test_accuracy <- sum(diag(test_confusion_matrix)) / sum(test_confusion_matrix)
+test_accuracy
+```
+```{r}
+# 画原本战队的胜率波动图，选战队T1为例
+LCK_team <- read.csv("LCK_team2.csv")
+LCK_player <- read.csv("LCK_player2.csv")
+# 选择T1的数据
+T1_team <- LCK_team[LCK_team$teamname=="T1",]
+T1_bot <- LCK_player[LCK_player$teamname=="T1" & LCK_player$position=="bot",]
+T1_jng <- LCK_player[LCK_player$teamname=="T1" & LCK_player$position=="jng",]
+T1_mid <- LCK_player[LCK_player$teamname=="T1" & LCK_player$position=="mid",]
+T1_top <- LCK_player[LCK_player$teamname=="T1" & LCK_player$position=="top",]
+T1_sup <- LCK_player[LCK_player$teamname=="T1" & LCK_player$position=="sup",]
+# 对T1原本的数据进行预测
+T1_bot_original_predictions <- predict(bot_model, newdata=T1_bot, type="response")
+T1_jng_original_predictions <- predict(jng_model, newdata=T1_jng, type="response")
+T1_mid_original_predictions <- predict(mid_model, newdata=T1_mid, type="response")
+T1_top_original_predictions <- predict(top_model, newdata=T1_top, type="response")
+T1_sup_original_predictions <- predict(sup_model, newdata=T1_sup, type="response")
+
+#尝试将预测结果集结合成一个新的数据集,根据gameid和side实现数据的对应
+T1_combined_data <- data.frame(gameid=T1_team$gameid,side=T1_team$side,realresult=T1_team$result)
+T1_combined_data$mid <- T1_mid_original_predictions
+T1_combined_data$top <- T1_top_original_predictions
+T1_combined_data$jng <- T1_jng_original_predictions
+T1_combined_data$bot <- T1_bot_original_predictions
+T1_combined_data$sup <- T1_sup_original_predictions
+
+T1_original_predictions <- compute(neu_model, T1_combined_data)$net.result
+T1_original_predictions <- data.frame(T1_original_predictions)
+T1_original_predicted_classes <- ifelse(T1_original_predictions$X2 > 0.5, 1, 0)
+T1_combined_data$original_predictions <- T1_original_predictions$X2
+T1_combined_data$original_predictions_res <- T1_original_predicted_classes
+
+# 计算总体胜率
+T1_original_winrate <- sum(T1_combined_data$original_predictions_res==1)/nrow(T1_combined_data)
+T1_original_winrate
+
+# 计算平均胜率
+T1_original_winrate_avg <- sum(T1_combined_data$original_predictions)/nrow(T1_combined_data)
+plot(T1_original_winrate_avg)
+```
+```{r}
+# 绘制每一场胜率图
+plot(T1_combined_data$original_predictions)
+```
+```{r}
+# 假设将T1的上单换成 Doran，先筛选Doran的数据
+top_Doran <- LCK_player[LCK_player$position=="top" & LCK_player$playername=="Doran",]
+nrow(top_Doran)
+
+# 计算Doran数据的预测值
+T1_top_change_predictions <- predict(top_model, newdata=top_Doran, type="response")
+
+# 随机选择T1队伍中的242行数据，然后以Doran的数据替代上单行，替换后的数据集为T1_combined_data_change
+set.seed(123)
+random_rows <- sample(nrow(T1_combined_data), 242)
+T1_combined_data_change <- T1_combined_data[random_rows,]
+T1_combined_data_change$top <-  T1_top_change_predictions
+
+T1_change_predictions <- compute(neu_model, T1_combined_data_change)$net.result
+T1_change_predictions <- data.frame(T1_change_predictions)
+T1_change_predicted_classes <- ifelse(T1_change_predictions$X2 > 0.5, 1, 0)
+T1_combined_data_change$change_predictions <- T1_change_predictions$X2
+T1_combined_data_change$change_predictions_res <- T1_change_predicted_classes
+
+# 计算替换后的总体胜率
+T1_change_winrate <- sum(T1_combined_data_change$change_predictions_res==1)/nrow(T1_combined_data_change)
+T1_change_winrate
+
+# 计算替换后的平均胜率
+T1_change_winrate_avg <- sum(T1_combined_data_change$change_predictions)/nrow(T1_combined_data_change)
+T1_change_winrate_avg
+
+
+```
+```{r}
+# 绘制替换后每一场胜率图
+plot(T1_combined_data_change$change_predictions)
+```
+
